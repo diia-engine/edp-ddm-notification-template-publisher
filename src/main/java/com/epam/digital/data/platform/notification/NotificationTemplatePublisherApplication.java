@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 EPAM Systems.
+ * Copyright 2023 EPAM Systems.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,8 @@
 
 package com.epam.digital.data.platform.notification;
 
+import com.epam.digital.data.platform.notification.client.NotificationTemplateRestClient;
+import com.epam.digital.data.platform.notification.dto.NotificationTemplateShortInfoResponseDto;
 import com.epam.digital.data.platform.notification.properties.AppProperties;
 import com.epam.digital.data.platform.notification.service.NotificationDirectoryLoader;
 import org.apache.commons.io.FileUtils;
@@ -45,12 +47,16 @@ public class NotificationTemplatePublisherApplication implements ApplicationRunn
 
   private final Map<String, NotificationDirectoryLoader> templateDirLoaders;
 
+  private final NotificationTemplateRestClient templateRestClient;
+
   public NotificationTemplatePublisherApplication(
       AppProperties appProperties,
       @Qualifier("templateDirLoaders")
-          Map<String, NotificationDirectoryLoader> templateDirLoaders) {
+          Map<String, NotificationDirectoryLoader> templateDirLoaders,
+          NotificationTemplateRestClient templateRestClient) {
     this.appProperties = appProperties;
     this.templateDirLoaders = templateDirLoaders;
+    this.templateRestClient = templateRestClient;
   }
 
   public static void main(String[] args) {
@@ -67,9 +73,18 @@ public class NotificationTemplatePublisherApplication implements ApplicationRunn
 
   private void getHandleNotifications() {
     var channelDirs = getChannelDirectories();
+    var allDbNotificationTemplates = templateRestClient.getAllTemplates();
     for (File channelDir: channelDirs) {
       log.info("Processing of directory {}", channelDir);
-      processChannelTemplates(channelDir);
+      if (!channelDir.isDirectory()) {
+        continue;
+      }
+      var channelName = channelDir.toPath().getFileName().toString();
+      processChannelTemplates(channelName, channelDir);
+
+      var channelNotificationTemplates = allDbNotificationTemplates.stream().filter(
+              template -> template.getChannel().equals(channelName)).collect(Collectors.toList());
+      deleteNonExistingChannelTemplates(channelDir, channelNotificationTemplates);
     }
   }
 
@@ -84,22 +99,37 @@ public class NotificationTemplatePublisherApplication implements ApplicationRunn
             });
   }
 
-  private void processChannelTemplates(File channelDir) {
-    if (!channelDir.isDirectory()) {
-      return;
-    }
-    var channelName = channelDir.toPath().getFileName().toString();
+  private void processChannelTemplates(String channelName, File channelDir) {
     var channelTemplateLoader = templateDirLoaders.get(channelName);
     if (channelTemplateLoader == null) {
       log.warn("No template loader for channel {}", channelName);
       return;
     }
-    var templateDirectories = Arrays.stream(Optional.ofNullable(channelDir.listFiles())
-            .orElse(new File[] {}))
-            .filter(File::isDirectory)
-            .collect(Collectors.toList());
+    var templateDirectories = getTemplateDirectories(channelDir);
     for (File templateDir : templateDirectories) {
       channelTemplateLoader.loadDir(templateDir);
     }
+  }
+
+  private void deleteNonExistingChannelTemplates(File channelDir,
+          List<NotificationTemplateShortInfoResponseDto> allDbNotificationTemplates) {
+    var templateDirectories = getTemplateDirectories(channelDir);
+    for (NotificationTemplateShortInfoResponseDto notificationTemplate : allDbNotificationTemplates) {
+      if (!directoriesContainsName(templateDirectories, notificationTemplate.getName())) {
+        log.info("Deleting notification template {}", notificationTemplate.getName());
+        templateRestClient.deleteTemplate(notificationTemplate.getId());
+      }
+    }
+  }
+
+  private List<File> getTemplateDirectories(File channelDir) {
+    return Arrays.stream(Optional.ofNullable(channelDir.listFiles())
+                    .orElse(new File[]{}))
+            .filter(File::isDirectory)
+            .collect(Collectors.toList());
+  }
+
+  private boolean directoriesContainsName(List<File> templateDirectories, String name) {
+    return templateDirectories.stream().anyMatch(dir -> dir.getName().equals(name));
   }
 }
